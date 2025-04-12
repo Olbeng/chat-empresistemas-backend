@@ -23,7 +23,12 @@ class Message extends Model
         'content',
         'status',
         'message_type',
-        'sent_at'
+        'sent_at',
+        'media_url',
+        'media_path',
+        'caption',
+        'media_metadata',
+        'error_message'
     ];
 
     /**
@@ -33,6 +38,7 @@ class Message extends Model
         'sent_at' => 'datetime',
         'created_at' => 'datetime',
         'updated_at' => 'datetime',
+        'media_metadata' => 'array'
     ];
 
     /**
@@ -40,8 +46,10 @@ class Message extends Model
      */
     protected $appends = [
         'is_outbound',
-        'formatted_sent_time'
+        'formatted_sent_time',
+        'media_full_url'
     ];
+
     protected static function booted()
     {
         static::creating(function ($model) {
@@ -49,6 +57,7 @@ class Message extends Model
             $model->updated_at = $model->freshTimestamp()->addHours(-6);
         });
     }
+
     /**
      * Constantes para los estados de los mensajes
      */
@@ -69,6 +78,15 @@ class Message extends Model
      */
     const MESSAGE_TYPE_TEXT = 'text';
     const MESSAGE_TYPE_TEMPLATE = 'template';
+
+    /**
+     * Nuevas constantes para tipos de mensajes multimedia
+     */
+    const MESSAGE_TYPE_IMAGE = 'image';
+    const MESSAGE_TYPE_AUDIO = 'audio';
+    const MESSAGE_TYPE_VIDEO = 'video';
+    const MESSAGE_TYPE_DOCUMENT = 'document';
+    const MESSAGE_TYPE_VOICE = 'voice';
 
     /**
      * Relación con el usuario
@@ -136,6 +154,20 @@ class Message extends Model
     }
 
     /**
+     * Scope para mensajes multimedia
+     */
+    public function scopeMedia($query)
+    {
+        return $query->whereIn('message_type', [
+            self::MESSAGE_TYPE_IMAGE,
+            self::MESSAGE_TYPE_AUDIO,
+            self::MESSAGE_TYPE_VIDEO,
+            self::MESSAGE_TYPE_DOCUMENT,
+            self::MESSAGE_TYPE_VOICE
+        ]);
+    }
+
+    /**
      * Accessor para verificar si el mensaje es saliente
      */
     public function getIsOutboundAttribute(): bool
@@ -149,6 +181,32 @@ class Message extends Model
     public function getFormattedSentTimeAttribute(): string
     {
         return $this->sent_at->format('M d, Y H:i');
+    }
+
+    /**
+     * Accessor para obtener la URL completa del medio
+     */
+    public function getMediaFullUrlAttribute(): ?string
+    {
+        if (empty($this->media_path)) {
+            return null;
+        }
+
+        return url('storage/' . $this->media_path);
+    }
+
+    /**
+     * Verifica si el mensaje es un mensaje multimedia
+     */
+    public function isMedia(): bool
+    {
+        return in_array($this->message_type, [
+            self::MESSAGE_TYPE_IMAGE,
+            self::MESSAGE_TYPE_AUDIO,
+            self::MESSAGE_TYPE_VIDEO,
+            self::MESSAGE_TYPE_DOCUMENT,
+            self::MESSAGE_TYPE_VOICE
+        ]);
     }
 
     /**
