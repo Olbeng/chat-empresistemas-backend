@@ -359,7 +359,7 @@ class WhatsAppWebhookController extends Controller
                         'id' => $message->id,
                         'text' => $message->content,
                         'sender' => $message->direction == Message::DIRECTION_OUT ? 'user' : 'other',
-                        'timestamp' => $message->sent_at ? $message->sent_at->addHours(6)->toIso8601String() : null,
+                        'timestamp' => $message->sent_at,
                         'status' => $message->status
                     ];
 

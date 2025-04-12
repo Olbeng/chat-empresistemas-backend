@@ -7,7 +7,6 @@ use App\Http\Controllers\ContactController;
 use App\Http\Controllers\MessageController;
 use App\Http\Controllers\WhatsAppWebhookController;
 
-
 // Route::get('/user', function (Request $request) {
 //     return $request->user();
 // })->middleware('auth:sanctum');
@@ -18,6 +17,7 @@ Route::post('logout', [AuthController::class, 'logout']);
 
 // Ruta para obtener token de Ably
 Route::middleware('jwt.auth')->get('/ably/token', [MessageController::class, 'getAblyToken']);
+
 
 // Rutas para webhooks del ERP
 Route::post('/erp-webhook/message-created', [MessageController::class, 'handleERPMessageCreated']);

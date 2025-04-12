@@ -104,7 +104,7 @@ class MessageController extends Controller
                 'id' => $message->id,
                 'text' => $message->content,
                 'sender' => 'user',
-                'timestamp' => $message->created_at->toIso8601String(),
+                'timestamp' => $message->created_at->addHours(6)->toIso8601String(),
                 'status' => $message->status
             ];
 
