@@ -5,19 +5,29 @@ namespace App\Http\Controllers;
 use App\Models\Message;
 use App\Models\Contact;
 use App\Services\MetaWhatsAppService;
+use App\Services\MessageService;
+use App\Services\NotificationService;
+use App\Services\MessageRepositoryService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
-use App\Services\AblyService;
 use Illuminate\Support\Facades\Log;
 
 class MessageController extends Controller
 {
-    protected $ablyService;
+    protected $messageService;
+    protected $notificationService;
+    protected $messageRepositoryService;
 
-    public function __construct(AblyService $ablyService)
-    {
-        $this->ablyService = $ablyService;
+    public function __construct(
+        MessageService $messageService,
+        NotificationService $notificationService,
+        MessageRepositoryService $messageRepositoryService
+    ) {
+        $this->messageService = $messageService;
+        $this->notificationService = $notificationService;
+        $this->messageRepositoryService = $messageRepositoryService;
     }
+
     public function getMessages($contactId, Request $request)
     {
         try {
@@ -36,16 +46,8 @@ class MessageController extends Controller
             // Reordenar los mensajes para que aparezcan en orden cronológico
             $messages = $messages->sortBy('id');
 
-            // Resto del código para formatear y devolver los mensajes...
-            $formattedMessages = $messages->map(function ($message) {
-                return [
-                    'id' => $message->id,
-                    'text' => $message->content,
-                    'sender' => $message->direction == "out" ? 'user' : 'other',
-                    'timestamp' => $message->created_at ? $message->created_at->addHours(6)->toIso8601String() : null,
-                    'status' => $message->status
-                ];
-            })->values()->all();
+            // Formatear usando el servicio - manteniendo añadir 6 horas
+            $formattedMessages = $this->messageService->formatMessageCollection($messages, true);
 
             // Total de mensajes para determinar si hay más
             $totalMessages = Message::where('contact_id', $contactId)->count();
@@ -75,6 +77,7 @@ class MessageController extends Controller
             'contact_id' => 'required|exists:contacts,id',
             'content' => 'required|string|max:4096',
         ]);
+
         $user = auth()->user();
         $phoneNumber = $user->phone_number;
         $tokenMeta = $user->token_meta;
@@ -87,9 +90,8 @@ class MessageController extends Controller
             $metaService = new MetaWhatsAppService($phoneNumber, $tokenMeta);
             $metaResponse = $metaService->sendMessage($contact->phone_number, $request->content);
 
-
             // Crear el mensaje con el estado inicial
-            $message = Message::create([
+            $messageData = [
                 'user_id' => $user->id,
                 'contact_id' => $request->contact_id,
                 'content' => $request->content,
@@ -98,22 +100,14 @@ class MessageController extends Controller
                 'meta_message_id' => $metaResponse->messages[0]->id ?? null,
                 'message_type' => Message::MESSAGE_TYPE_TEXT,
                 'sent_at' => now()
-            ]);
-
-            $messageData = [
-                'id' => $message->id,
-                'text' => $message->content,
-                'sender' => 'user',
-                'timestamp' => $message->created_at->addHours(6)->toIso8601String(),
-                'status' => $message->status
             ];
 
-            // Publicar evento de nuevo mensaje en Ably
-            $this->ablyService->publish(
-                'messages-channel-' . $request->contact_id,
-                'new-message',
-                $messageData
-            );
+            // Usar el servicio para crear el mensaje
+            $messageId = $this->messageRepositoryService->upsertMessage($messageData);
+            $message = Message::find($messageId);
+
+            // Formatear la respuesta - con 6 horas adicionales
+            $messageData = $this->messageService->formatMessage($message, true);
 
             return response()->json([
                 'success' => true,
@@ -125,24 +119,24 @@ class MessageController extends Controller
             Log::error('Error al enviar mensaje: ' . $e->getMessage());
 
             // Si el envío falla, crear un mensaje con estado de error
-            $failedMessage = Message::create([
+            $failedMessageData = [
                 'user_id' => $user->id,
                 'contact_id' => $request->contact_id,
                 'content' => $request->content,
                 'direction' => Message::DIRECTION_OUT,
                 'status' => Message::STATUS_FAILED,
                 'sent_at' => now()
-            ]);
+            ];
+
+            $failedMessageId = $this->messageRepositoryService->upsertMessage($failedMessageData);
+            $failedMessage = Message::find($failedMessageId);
+
+            // Formatear la respuesta de error
+            $messageData = $this->messageService->formatMessage($failedMessage, true);
 
             return response()->json([
                 'success' => false,
-                'data' => [
-                    'id' => $failedMessage->id,
-                    'text' => $failedMessage->content,
-                    'sender' => 'user',
-                    'timestamp' => $failedMessage->created_at->toIso8601String(),
-                    'status' => $failedMessage->status
-                ],
+                'data' => $messageData,
                 'message' => 'Error al enviar mensaje',
                 'error' => $e->getMessage()
             ], 500);
@@ -151,38 +145,14 @@ class MessageController extends Controller
 
     public function updateMessageStatus($contactId)
     {
-        // Actualiza todos los mensajes del contacto estableciendo un estado predeterminado
-        $updatedMessages = Message::where('contact_id', $contactId)
-            ->update([
-                'status' => 'read'
-            ]);
-
-        // Obtener los mensajes actualizados para enviarlos por Ably
-        $messages = Message::where('contact_id', $contactId)
-            ->get()
-            ->map(function ($message) {
-                return [
-                    'id' => $message->id,
-                    'status' => $message->status
-                ];
-            });
-
-        // Publicar evento de actualización de estado en Ably
-        $this->ablyService->publish(
-            'messages-channel-' . $contactId,
-            'status-update',
-            [
-                'contact_id' => $contactId,
-                'messages' => $messages
-            ]
-        );
+        // Actualizar los mensajes usando el servicio
+        $updatedCount = $this->messageRepositoryService->updateBulkMessageStatus($contactId, 'read');
 
         return response()->json([
             'message' => 'Mensajes actualizados',
-            'updated_count' => $updatedMessages
+            'updated_count' => $updatedCount
         ]);
     }
-    // Nuevos métodos para los webhooks del ERP
 
     /**
      * Manejar la notificación de un nuevo mensaje creado por el ERP
@@ -200,7 +170,7 @@ class MessageController extends Controller
             if ($request->secret_key !== config('app.erp_webhook_secret')) {
                 return response()->json(['success' => false, 'message' => 'Unauthorized'], 401);
             }
-            Log::error('ejecutando: handleERPMessageCreated');
+            Log::info('ejecutando: handleERPMessageCreated');
 
             // Buscar el mensaje
             $message = Message::find($request->message_id);
@@ -208,24 +178,12 @@ class MessageController extends Controller
                 return response()->json(['success' => false, 'message' => 'Message not found'], 404);
             }
 
-            Log::error('mensaje encontrado: handleERPMessageCreated');
-            // Preparar los datos
-            $messageData = [
-                'id' => $message->id,
-                'text' => $message->content,
-                'sender' => $message->direction == "out" ? 'user' : 'other',
-                'timestamp' => $message->created_at ? $message->created_at->addHours(6)->toIso8601String() : null,
-                'status' => $message->status
-            ];
-            Log::error('mensaje fecha: handleERPMessageCreated '.($message->created_at ? $message->created_at->addHours(6)->toIso8601String() : null));
+            Log::info('mensaje encontrado: handleERPMessageCreated');
 
-            // Publicar en Ably
-            $this->ablyService->publish(
-                'messages-channel-' . $message->contact_id,
-                'new-message',
-                $messageData
-            );
-            Log::error('abky ejecutado: handleERPMessageCreated messages-channel-'. $message->contact_id);
+            // Usar el servicio especializado para notificaciones ERP
+            $this->notificationService->notifyERPMessage($message);
+
+            Log::info('abky ejecutado: handleERPMessageCreated messages-channel-'. $message->contact_id);
 
             return response()->json(['success' => true, 'message' => 'Notification sent']);
         } catch (\Exception $e) {
@@ -241,7 +199,7 @@ class MessageController extends Controller
     {
         try {
 
-            Log::error('Se ejecuto handleERPMessageUpdated');
+            Log::info('Se ejecuto handleERPMessageUpdated');
             // Validar la solicitud
             $request->validate([
                 'message_id' => 'required|integer',
@@ -259,19 +217,8 @@ class MessageController extends Controller
                 return response()->json(['success' => false, 'message' => 'Message not found'], 404);
             }
 
-            // Publicar en Ably
-            $this->ablyService->publish(
-                'messages-channel-' . $message->contact_id,
-                'status-update',
-                [
-                    'messages' => [
-                        [
-                            'id' => $message->id,
-                            'status' => $message->status
-                        ]
-                    ]
-                ]
-            );
+            // Usar el servicio para notificar la actualización
+            $this->notificationService->notifyStatusUpdate($message);
 
             return response()->json(['success' => true, 'message' => 'Status update notification sent']);
         } catch (\Exception $e) {
@@ -279,63 +226,54 @@ class MessageController extends Controller
             return response()->json(['success' => false, 'message' => $e->getMessage()], 500);
         }
     }
+
     public function getBatchInitialMessages(Request $request)
-{
-    try {
-        // Obtener parámetros
-        $limit = $request->input('limit', 20);
+    {
+        try {
+            // Obtener parámetros
+            $limit = $request->input('limit', 20);
 
-        // Obtener el usuario autenticado
-        $user = auth()->user();
+            // Obtener el usuario autenticado
+            $user = auth()->user();
 
-        // Obtener todos los contactos del usuario
-        $contacts = Contact::where('user_id', $user->id)->get();
+            // Obtener todos los contactos del usuario
+            $contacts = Contact::where('user_id', $user->id)->get();
 
-        // Preparar el resultado
-        $result = [];
+            // Preparar el resultado
+            $result = [];
 
-        // Para cada contacto, obtener sus mensajes más recientes
-        foreach ($contacts as $contact) {
-            // Obtener mensajes ordenados por id descendente (más recientes primero)
-            // Exactamente como en getMessages
-            $messagesQuery = Message::where('contact_id', $contact->id)
-                ->orderBy('id', 'desc')
-                ->limit($limit)
-                ->get();
+            // Para cada contacto, obtener sus mensajes más recientes
+            foreach ($contacts as $contact) {
+                // Obtener mensajes ordenados por id descendente (más recientes primero)
+                $messagesQuery = Message::where('contact_id', $contact->id)
+                    ->orderBy('id', 'desc')
+                    ->limit($limit)
+                    ->get();
 
-            // Reordenar los mensajes para que aparezcan en orden cronológico
-            // El sortBy genera una colección ordenada ascendentemente
-            $messages = $messagesQuery->sortBy('id');
+                // Reordenar los mensajes para que aparezcan en orden cronológico
+                $messages = $messagesQuery->sortBy('id');
 
-            // Formatear los mensajes igual que en getMessages
-            $formattedMessages = $messages->map(function ($message) {
-                return [
-                    'id' => $message->id,
-                    'text' => $message->content,
-                    'sender' => $message->direction == "out" ? 'user' : 'other',
-                    'timestamp' => $message->created_at ? $message->created_at->addHours(6)->toIso8601String() : null,
-                    'status' => $message->status
-                ];
-            })->values()->all();
+                // Formatear mensajes usando el servicio - manteniendo añadir 6 horas
+                $formattedMessages = $this->messageService->formatMessageCollection($messages, true);
 
-            // Añadir al resultado usando el ID del contacto como clave
-            $result[$contact->id] = $formattedMessages;
+                // Añadir al resultado usando el ID del contacto como clave
+                $result[$contact->id] = $formattedMessages;
+            }
+
+            return response()->json([
+                'success' => true,
+                'data' => $result
+            ]);
+
+        } catch (\Exception $e) {
+            Log::error('Error al obtener mensajes en lote: ' . $e->getMessage());
+            return response()->json([
+                'success' => false,
+                'message' => 'Error al obtener mensajes en lote',
+                'error' => $e->getMessage()
+            ], 500);
         }
-
-        return response()->json([
-            'success' => true,
-            'data' => $result
-        ]);
-
-    } catch (\Exception $e) {
-        Log::error('Error al obtener mensajes en lote: ' . $e->getMessage());
-        return response()->json([
-            'success' => false,
-            'message' => 'Error al obtener mensajes en lote',
-            'error' => $e->getMessage()
-        ], 500);
     }
-}
 
     /**
      * Endpoint para generar token de Ably para el frontend
@@ -351,7 +289,7 @@ class MessageController extends Controller
             $clientId = "user-{$user->id}";
 
             // Generar el token request con el clientId
-            $tokenRequest = $this->ablyService->generateToken($clientId);
+            $tokenRequest = $this->notificationService->getAblyService()->generateToken($clientId);
 
             // Registrar información para depuración
             Log::debug('Token Ably generado correctamente', [

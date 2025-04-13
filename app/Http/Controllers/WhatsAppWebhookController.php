@@ -5,21 +5,32 @@ namespace App\Http\Controllers;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Carbon;
-use Illuminate\Support\Facades\Storage;
-use GuzzleHttp\Client;
 use App\Models\Message;
 use App\Models\User;
 use App\Models\Contact;
-use App\Services\AblyService;
+use App\Services\MessageService;
+use App\Services\NotificationService;
+use App\Services\MessageRepositoryService;
+use App\Services\MediaService;
 use App\Services\MetaWhatsAppService;
 
 class WhatsAppWebhookController extends Controller
 {
-    protected $ablyService;
+    protected $messageService;
+    protected $notificationService;
+    protected $messageRepositoryService;
+    protected $mediaService;
 
-    public function __construct(AblyService $ablyService)
-    {
-        $this->ablyService = $ablyService;
+    public function __construct(
+        MessageService $messageService,
+        NotificationService $notificationService,
+        MessageRepositoryService $messageRepositoryService,
+        MediaService $mediaService
+    ) {
+        $this->messageService = $messageService;
+        $this->notificationService = $notificationService;
+        $this->messageRepositoryService = $messageRepositoryService;
+        $this->mediaService = $mediaService;
     }
 
     /**
@@ -38,8 +49,8 @@ class WhatsAppWebhookController extends Controller
                 $hubVerifyToken = $request->input('hub_verify_token');
                 $hubChallenge = $request->input('hub_challenge');
 
-                // Verificar token en la base de datos
-                $isValid = $this->verifyTokenExists($hubVerifyToken);
+                // Verificar token en la base de datos usando el servicio
+                $isValid = $this->messageService->verifyTokenExists($hubVerifyToken);
 
                 if ($isValid) {
                     Log::info('Webhook de WhatsApp verificado exitosamente');
@@ -160,53 +171,11 @@ class WhatsAppWebhookController extends Controller
                         break;
 
                     case 'audio':
-                        // Verificar que tenga la estructura esperada
-                        if (!isset($message['audio']['id'])) {
-                            Log::error("Mensaje de audio sin ID de medio", ['message' => $message]);
-                            continue;
-                        }
-
-                        $this->handleMediaMessage($phone_number_id, $message, Message::MESSAGE_TYPE_AUDIO);
-                        break;
-
                     case 'image':
-                        // Verificar que tenga la estructura esperada
-                        if (!isset($message['image']['id'])) {
-                            Log::error("Mensaje de imagen sin ID de medio", ['message' => $message]);
-                            continue;
-                        }
-
-                        $this->handleMediaMessage($phone_number_id, $message, Message::MESSAGE_TYPE_IMAGE);
-                        break;
-
                     case 'video':
-                        // Verificar que tenga la estructura esperada
-                        if (!isset($message['video']['id'])) {
-                            Log::error("Mensaje de video sin ID de medio", ['message' => $message]);
-                            continue;
-                        }
-
-                        $this->handleMediaMessage($phone_number_id, $message, Message::MESSAGE_TYPE_VIDEO);
-                        break;
-
                     case 'document':
-                        // Verificar que tenga la estructura esperada
-                        if (!isset($message['document']['id'])) {
-                            Log::error("Mensaje de documento sin ID de medio", ['message' => $message]);
-                            continue;
-                        }
-
-                        $this->handleMediaMessage($phone_number_id, $message, Message::MESSAGE_TYPE_DOCUMENT);
-                        break;
-
                     case 'voice':
-                        // Verificar que tenga la estructura esperada
-                        if (!isset($message['voice']['id'])) {
-                            Log::error("Mensaje de voz sin ID de medio", ['message' => $message]);
-                            continue;
-                        }
-
-                        $this->handleMediaMessage($phone_number_id, $message, Message::MESSAGE_TYPE_VOICE);
+                        $this->handleMediaMessage($phone_number_id, $message, $messageType);
                         break;
 
                     default:
@@ -270,10 +239,10 @@ class WhatsAppWebhookController extends Controller
         $date = Carbon::createFromTimestamp($timestamp);
 
         // Obtener el ID del usuario basado en el phone_number_id
-        $userId = $this->getUserIdByPhoneNumber($phone_number_id);
+        $userId = $this->messageService->getUserIdByPhoneNumber($phone_number_id);
 
         // Obtener el ID del contacto
-        $contactId = $this->getContactIdByUserIdAndPhone($userId, $sender);
+        $contactId = $this->messageService->getContactIdByUserIdAndPhone($userId, $sender);
 
         // Si no se encuentra el contacto, registrar el error
         if (!$contactId) {
@@ -296,8 +265,9 @@ class WhatsAppWebhookController extends Controller
             'sent_at' => $date
         ];
 
-        // Insertar o actualizar mensaje
-        $messageId = $this->upsertMessage($messageData);
+        // Insertar o actualizar mensaje usando el servicio de repositorio
+        // Indicar que viene de webhook para formatear correctamente la fecha
+        $messageId = $this->messageRepositoryService->upsertMessage($messageData, true);
 
         // Registrar éxito
         Log::info("Mensaje de texto procesado exitosamente", [
@@ -366,7 +336,7 @@ class WhatsAppWebhookController extends Controller
         }
 
         // Obtener información del medio desde la API de Meta
-        $mediaInfo = $this->getMediaInfo($mediaId, $user);
+        $mediaInfo = $this->mediaService->getMediaInfo($mediaId, $user);
 
         if (!$mediaInfo) {
             Log::error("No se pudo obtener información del medio", [
@@ -376,7 +346,7 @@ class WhatsAppWebhookController extends Controller
         }
 
         // Descargar y guardar el medio
-        $mediaPath = $this->downloadAndSaveMedia($mediaInfo, $messageType, $filename, $user);
+        $mediaPath = $this->mediaService->downloadAndSaveMedia($mediaInfo, $messageType, $filename, $user);
 
         if (!$mediaPath) {
             Log::error("Error al descargar y guardar el medio", [
@@ -389,7 +359,7 @@ class WhatsAppWebhookController extends Controller
         $userId = $user->id;
 
         // Obtener el ID del contacto
-        $contactId = $this->getContactIdByUserIdAndPhone($userId, $sender);
+        $contactId = $this->messageService->getContactIdByUserIdAndPhone($userId, $sender);
 
         // Si no se encuentra el contacto, registrar el error
         if (!$contactId) {
@@ -401,7 +371,7 @@ class WhatsAppWebhookController extends Controller
         }
 
         // Preparar contenido descriptivo
-        $content = $caption ?: ($filename ?: $this->getDefaultContentByType($messageType));
+        $content = $caption ?: ($filename ?: $this->mediaService->getDefaultContentByType($messageType));
 
         // Preparar datos del mensaje
         $messageData = [
@@ -419,198 +389,15 @@ class WhatsAppWebhookController extends Controller
             'media_metadata' => json_encode($metadata)
         ];
 
-        // Insertar o actualizar mensaje
-        $messageId = $this->upsertMessage($messageData);
+        // Insertar o actualizar mensaje usando el servicio de repositorio
+        // Indicar que viene de webhook para formatear correctamente la fecha
+        $messageId = $this->messageRepositoryService->upsertMessage($messageData, true);
 
         // Registrar éxito
         Log::info("Mensaje multimedia procesado exitosamente", [
             'message_id' => $messageId,
             'media_path' => $mediaPath
         ]);
-    }
-
-    /**
-     * Obtiene información del medio desde la API de Meta
-     */
-    private function getMediaInfo($mediaId, $user)
-    {
-        try {
-            $client = new Client();
-            $url = "https://graph.facebook.com/v20.0/{$mediaId}";
-
-            $response = $client->request('GET', $url, [
-                'headers' => [
-                    'Authorization' => "Bearer {$user->token_meta}"
-                ]
-            ]);
-
-            if ($response->getStatusCode() !== 200) {
-                Log::error("Error al obtener información del medio", [
-                    'media_id' => $mediaId,
-                    'status' => $response->getStatusCode()
-                ]);
-                return null;
-            }
-
-            return json_decode($response->getBody(), true);
-        } catch (\Exception $e) {
-            Log::error("Error al obtener información del medio: " . $e->getMessage(), [
-                'media_id' => $mediaId,
-                'trace' => $e->getTraceAsString()
-            ]);
-            return null;
-        }
-    }
-
-    /**
-     * Descarga y guarda el medio en el almacenamiento
-     */
-    private function downloadAndSaveMedia($mediaInfo, $messageType, $originalFilename, $user)
-    {
-        try {
-            if (!isset($mediaInfo['url'])) {
-                Log::error("La información del medio no contiene URL", [
-                    'media_info' => $mediaInfo
-                ]);
-                return null;
-            }
-
-            $mediaUrl = $mediaInfo['url'];
-            $client = new Client();
-
-            // Descargar contenido del medio
-            $response = $client->request('GET', $mediaUrl, [
-                'headers' => [
-                    'Authorization' => "Bearer {$user->token_meta}"
-                ]
-            ]);
-
-            if ($response->getStatusCode() !== 200) {
-                Log::error("Error al descargar medio", [
-                    'url' => $mediaUrl,
-                    'status' => $response->getStatusCode()
-                ]);
-                return null;
-            }
-
-            $mediaContent = $response->getBody()->getContents();
-
-            // Determinar extensión y nombre de archivo
-            $extension = $this->getExtensionByMessageType($messageType, $originalFilename);
-            $filename = $originalFilename ?? uniqid('whatsapp_') . '.' . $extension;
-
-            // Asegurar que el nombre del archivo solo tenga caracteres seguros
-            $filename = $this->sanitizeFilename($filename);
-
-            // Determinar carpeta de almacenamiento
-            $folder = $this->getFolderByMessageType($messageType);
-            $path = "whatsapp/{$folder}/" . date('Y/m/d') . '/' . $filename;
-
-            // Asegurar que la carpeta existe
-            $directory = dirname(storage_path('app/public/' . $path));
-            if (!file_exists($directory)) {
-                mkdir($directory, 0755, true);
-            }
-
-            // Guardar archivo en el almacenamiento
-            Storage::disk('public')->put($path, $mediaContent);
-
-            Log::info("Medio guardado exitosamente", [
-                'path' => $path
-            ]);
-
-            return $path;
-        } catch (\Exception $e) {
-            Log::error("Error al descargar y guardar medio: " . $e->getMessage(), [
-                'media_info' => $mediaInfo,
-                'trace' => $e->getTraceAsString()
-            ]);
-            return null;
-        }
-    }
-
-    /**
-     * Sanea el nombre de archivo para evitar problemas de seguridad
-     */
-    private function sanitizeFilename($filename)
-    {
-        // Eliminar caracteres no seguros
-        $filename = preg_replace('/[^\w\-\.]/', '_', $filename);
-
-        // Asegurar que no haya rutas de directorios
-        $filename = basename($filename);
-
-        return $filename;
-    }
-
-    /**
-     * Obtiene la extensión de archivo basada en el tipo de mensaje
-     */
-    private function getExtensionByMessageType($messageType, $originalFilename = null)
-    {
-        // Si tenemos el nombre original, intentar obtener la extensión de allí
-        if ($originalFilename) {
-            $parts = explode('.', $originalFilename);
-            if (count($parts) > 1) {
-                return strtolower(end($parts));
-            }
-        }
-
-        // Asignar extensiones por defecto según el tipo
-        switch ($messageType) {
-            case Message::MESSAGE_TYPE_AUDIO:
-            case Message::MESSAGE_TYPE_VOICE:
-                return 'mp3';
-            case Message::MESSAGE_TYPE_IMAGE:
-                return 'jpg';
-            case Message::MESSAGE_TYPE_VIDEO:
-                return 'mp4';
-            case Message::MESSAGE_TYPE_DOCUMENT:
-                return 'pdf';
-            default:
-                return 'bin';
-        }
-    }
-
-    /**
-     * Obtiene la carpeta de almacenamiento basada en el tipo de mensaje
-     */
-    private function getFolderByMessageType($messageType)
-    {
-        switch ($messageType) {
-            case Message::MESSAGE_TYPE_AUDIO:
-            case Message::MESSAGE_TYPE_VOICE:
-                return 'audios';
-            case Message::MESSAGE_TYPE_IMAGE:
-                return 'images';
-            case Message::MESSAGE_TYPE_VIDEO:
-                return 'videos';
-            case Message::MESSAGE_TYPE_DOCUMENT:
-                return 'documents';
-            default:
-                return 'others';
-        }
-    }
-
-    /**
-     * Obtiene un contenido descriptivo predeterminado según el tipo de mensaje
-     */
-    private function getDefaultContentByType($messageType)
-    {
-        switch ($messageType) {
-            case Message::MESSAGE_TYPE_AUDIO:
-                return 'Mensaje de audio';
-            case Message::MESSAGE_TYPE_VOICE:
-                return 'Mensaje de voz';
-            case Message::MESSAGE_TYPE_IMAGE:
-                return 'Imagen';
-            case Message::MESSAGE_TYPE_VIDEO:
-                return 'Video';
-            case Message::MESSAGE_TYPE_DOCUMENT:
-                return 'Documento';
-            default:
-                return 'Mensaje multimedia';
-        }
     }
 
     /**
@@ -627,13 +414,10 @@ class WhatsAppWebhookController extends Controller
 
         if ($message) {
             // Mapear el estado y actualizar el mensaje
-            $internalStatus = $this->mapStatusToInternal($statusText);
+            $internalStatus = $this->messageService->mapStatusToInternal($statusText);
 
-            // Utilizar el método updateStatus del modelo
-            $message->updateStatus($internalStatus);
-
-            // Notificar actualización de estado a través de Ably
-            $this->notifyStatusUpdate($message);
+            // Usar el servicio para actualizar el estado
+            $this->messageRepositoryService->updateMessageStatus($message, $internalStatus);
 
             Log::info("Estado de mensaje actualizado", [
                 'meta_message_id' => $messageId,
@@ -643,230 +427,6 @@ class WhatsAppWebhookController extends Controller
             Log::warning("No se encontró el mensaje para actualizar el estado", [
                 'meta_message_id' => $messageId
             ]);
-        }
-    }
-
-    /**
-     * Notifica la actualización de estado a través de Ably
-     */
-    private function notifyStatusUpdate($message)
-    {
-        try {
-            $this->ablyService->publish(
-                'messages-channel-' . $message->contact_id,
-                'status-update',
-                [
-                    'messages' => [
-                        [
-                            'id' => $message->id,
-                            'status' => $message->status
-                        ]
-                    ]
-                ]
-            );
-
-            Log::info("Notificación de actualización de estado enviada", [
-                'message_id' => $message->id,
-                'contact_id' => $message->contact_id
-            ]);
-        } catch (\Exception $e) {
-            Log::error("Error al notificar actualización de estado: " . $e->getMessage());
-        }
-    }
-
-    /**
-     * Notifica nuevo mensaje multimedia
-     */
-    private function notifyNewMediaMessage($message)
-    {
-        try {
-            // Preparar datos del mensaje para el frontend
-            $messageData = [
-                'id' => $message->id,
-                'text' => $message->content,
-                'sender' => $message->direction == Message::DIRECTION_OUT ? 'user' : 'other',
-                'timestamp' => $message->sent_at,
-                'status' => $message->status,
-                'type' => $message->message_type,
-                'media_url' => $message->media_full_url,
-                'caption' => $message->caption
-            ];
-
-            // Publicar evento
-            $this->ablyService->publish(
-                'messages-channel-' . $message->contact_id,
-                'new-message',
-                $messageData
-            );
-
-            Log::info("Notificación de nuevo mensaje multimedia enviada", [
-                'message_id' => $message->id,
-                'contact_id' => $message->contact_id
-            ]);
-        } catch (\Exception $e) {
-            Log::error("Error al notificar nuevo mensaje multimedia: " . $e->getMessage());
-        }
-    }
-
-    /**
-     * Mapea el estado de la API de Meta al estado interno
-     */
-    private function mapStatusToInternal($metaStatus)
-    {
-        $statusMap = [
-            'sent' => Message::STATUS_SENT,
-            'delivered' => Message::STATUS_DELIVERED,
-            'read' => Message::STATUS_READ,
-            'failed' => Message::STATUS_FAILED
-        ];
-
-        return isset($statusMap[$metaStatus]) ? $statusMap[$metaStatus] : 'received';
-    }
-
-    /**
-     * Determina el tipo de mensaje basado en el estado
-     */
-    private function determineMessageType($status)
-    {
-        return isset($status['marketing']) ? Message::MESSAGE_TYPE_TEMPLATE : Message::MESSAGE_TYPE_TEXT;
-    }
-
-    /**
-     * Inserta o actualiza un mensaje
-     */
-    private function upsertMessage($data)
-    {
-        try {
-            // Verificar si el mensaje existe por meta_message_id
-            $existingMessage = Message::where('meta_message_id', $data['meta_message_id'])->first();
-            $messageId = null;
-            $isUpdate = false;
-            $isMedia = in_array($data['message_type'] ?? '', [
-                Message::MESSAGE_TYPE_IMAGE,
-                Message::MESSAGE_TYPE_AUDIO,
-                Message::MESSAGE_TYPE_VIDEO,
-                Message::MESSAGE_TYPE_DOCUMENT,
-                Message::MESSAGE_TYPE_VOICE
-            ]);
-
-            if ($existingMessage) {
-                // Actualizar mensaje existente
-                $existingMessage->update($data);
-                $messageId = $existingMessage->id;
-                $isUpdate = true;
-            } else {
-                // Crear nuevo mensaje
-                $message = Message::create($data);
-                $messageId = $message->id;
-            }
-
-            // Obtener el mensaje actualizado o creado
-            $message = Message::find($messageId);
-
-            // Notificar al frontend a través de Ably
-            if ($messageId) {
-                if ($isUpdate) {
-                    Log::info("Preparando notificación para actualización de mensaje", [
-                        'message_id' => $messageId
-                    ]);
-
-                    // Publicar evento de actualización de estado
-                    $this->ablyService->publish(
-                        'messages-channel-' . $data['contact_id'],
-                        'status-update',
-                        [
-                            'messages' => [
-                                [
-                                    'id' => $messageId,
-                                    'status' => $message->status
-                                ]
-                            ]
-                        ]
-                    );
-                } else {
-                    Log::info("Preparando notificación para creación de mensaje", [
-                        'message_id' => $messageId,
-                        'message_type' => $data['message_type']
-                    ]);
-
-                    // Si es un mensaje multimedia, usar la notificación específica
-                    if ($isMedia) {
-                        $this->notifyNewMediaMessage($message);
-                    } else {
-                        // Preparar datos para Ably para mensaje de texto normal
-                        $messageData = [
-                            'id' => $message->id,
-                            'text' => $message->content,
-                            'sender' => $message->direction == Message::DIRECTION_OUT ? 'user' : 'other',
-                            'timestamp' => $message->sent_at,
-                            'status' => $message->status
-                        ];
-
-                        // Publicar evento de nuevo mensaje
-                        $this->ablyService->publish(
-                            'messages-channel-' . $data['contact_id'],
-                            'new-message',
-                            $messageData
-                        );
-                    }
-                }
-            }
-
-            return $messageId;
-        } catch (\Exception $e) {
-            Log::error("Error en upsertMessage: " . $e->getMessage(), [
-                'trace' => $e->getTraceAsString(),
-                'data' => $data
-            ]);
-            return null;
-        }
-    }
-
-    /**
-     * Obtiene ID de usuario por número de teléfono
-     */
-    private function getUserIdByPhoneNumber($phoneNumber)
-    {
-        try {
-            $user = User::where('phone_number', $phoneNumber)->first();
-            return $user ? $user->id : null;
-        } catch (\Exception $e) {
-            Log::error("Error buscando usuario por número de teléfono: " . $e->getMessage());
-            return null;
-        }
-    }
-
-    /**
-     * Obtiene ID de contacto por ID de usuario y teléfono
-     */
-    private function getContactIdByUserIdAndPhone($userId, $phoneNumber)
-    {
-        try {
-            if (!$userId) {
-                return null;
-            }
-
-            $contact = Contact::where('user_id', $userId)
-                ->where('phone_number', $phoneNumber)
-                ->first();
-
-            return $contact ? $contact->id : null;
-        } catch (\Exception $e) {
-            Log::error("Error buscando contacto: " . $e->getMessage());
-            return null;
-        }
-    }
-
-    /**
-     * Verifica si el token existe en la base de datos
-     */
-    private function verifyTokenExists($token)
-    {
-        try {
-            return User::where('verify_token', $token)->exists();
-        } catch (\Exception $e) {
-            Log::error("Error verificando token: " . $e->getMessage());
-            return false;
         }
     }
 }
