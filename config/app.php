@@ -14,7 +14,7 @@ return [
     */
 
     'name' => env('APP_NAME', 'Laravel'),
-
+    'media_url' => env('MEDIA_BASE_URL', env('APP_URL')),
     /*
     |--------------------------------------------------------------------------
     | Application Environment

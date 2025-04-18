@@ -29,7 +29,8 @@ class AuthController extends Controller
             'user' => [
                 'id' => $user->id,
                 'phone_number' => $user->phone_number,
-                'name' => $user->name
+                'name' => $user->name,
+                'permission' => explode(',', $user->permission),
             ]
         ]);
     }

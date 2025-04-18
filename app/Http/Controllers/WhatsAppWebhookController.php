@@ -156,7 +156,7 @@ class WhatsAppWebhookController extends Controller
                         // Verificar que tenga la estructura esperada
                         if (!isset($message['text']['body'])) {
                             Log::error("Mensaje de texto sin cuerpo", ['message' => $message]);
-                            continue;
+                            continue 2;
                         }
 
                         $data = [
@@ -196,26 +196,31 @@ class WhatsAppWebhookController extends Controller
                     continue;
                 }
 
-                // Procesar el estado
+                // Procesar el estado - solo actualiza el estado, no el tipo si ya existe
                 $this->handleMessageStatus($status);
 
-                // Si es un mensaje de plantilla
+                // Si es un mensaje de plantilla Y no existe en la base de datos, crearlo
                 if (
                     isset($status['conversation']['origin']['type']) &&
                     $status['conversation']['origin']['type'] === 'utility'
                 ) {
-                    Log::info("Procesando mensaje de plantilla", ['status' => $status]);
+                    // Verificar si el mensaje ya existe
+                    $existingMessage = Message::where('meta_message_id', $status['id'])->first();
 
-                    $data = [
-                        "meta_message_id" => $status['id'],
-                        "content" => 'mensaje automatico del sistema',
-                        "sender" => $status['recipient_id'],
-                        "timestamp" => $status['timestamp'],
-                        "status" => $status['status'],
-                        "direction" => Message::DIRECTION_OUT
-                    ];
+                    // Solo crear un nuevo mensaje si no existe
+                    if (!$existingMessage) {
+                        Log::info("Creando nuevo mensaje de plantilla", ['status' => $status]);
 
-                    $this->handleTextMessage($phone_number_id, $data, Message::MESSAGE_TYPE_TEMPLATE);
+                        $data = [
+                            "meta_message_id" => $status['id'],
+                            "sender" => $status['recipient_id'],
+                            "timestamp" => $status['timestamp'],
+                            "status" => $status['status'],
+                            "direction" => Message::DIRECTION_OUT
+                        ];
+
+                        $this->handleTextMessage($phone_number_id, $data, Message::MESSAGE_TYPE_TEMPLATE);
+                    }
                 }
             }
         }
@@ -234,7 +239,7 @@ class WhatsAppWebhookController extends Controller
         ]);
 
         $sender = $data['sender'];
-        $content = isset($data['content']) ? $data['content'] : '[Sin texto]';
+        $content = isset($data['content']) ? $data['content'] : '';
         $timestamp = $data['timestamp'];
         $date = Carbon::createFromTimestamp($timestamp);
 
@@ -259,11 +264,14 @@ class WhatsAppWebhookController extends Controller
             'contact_id' => $contactId,
             'meta_message_id' => isset($data['meta_message_id']) ? $data['meta_message_id'] : null,
             'direction' => $data['direction'],
-            'content' => $content,
             'status' => $data['status'],
             'message_type' => $typeMessage,
             'sent_at' => $date
         ];
+        // Agregar content solo si no está vacío
+        if ($content != "") {
+            $messageData['content'] = $content;
+        }
 
         // Insertar o actualizar mensaje usando el servicio de repositorio
         // Indicar que viene de webhook para formatear correctamente la fecha
@@ -394,39 +402,61 @@ class WhatsAppWebhookController extends Controller
         $messageId = $this->messageRepositoryService->upsertMessage($messageData, true);
 
         // Registrar éxito
-        Log::info("Mensaje multimedia procesado exitosamente", [
-            'message_id' => $messageId,
-            'media_path' => $mediaPath
-        ]);
+        Log::info("Mensaje multimedia procesado exitosamente", $messageData);
     }
 
     /**
      * Maneja las actualizaciones de estado de mensajes
      */
+    /**
+     * Maneja las actualizaciones de estado de los mensajes
+     *
+     * @param array $status Los datos del estado del mensaje
+     * @return bool Éxito de la operación
+     */
     private function handleMessageStatus($status)
     {
-        $messageId = $status['id'];
-        $statusText = $status['status'];
-        $statusTimestamp = Carbon::createFromTimestamp($status['timestamp']);
+        // Extraer información relevante
+        $metaMessageId = $status['id'];
+        $statusValue = $status['status'];
 
-        // Buscar mensaje por meta_message_id
-        $message = Message::where('meta_message_id', $messageId)->first();
+        // Buscar el mensaje en la base de datos
+        $message = Message::where('meta_message_id', $metaMessageId)->first();
 
-        if ($message) {
-            // Mapear el estado y actualizar el mensaje
-            $internalStatus = $this->messageService->mapStatusToInternal($statusText);
+        if (!$message) {
+            Log::info("Mensaje no encontrado para actualización de estado", [
+                'meta_message_id' => $metaMessageId,
+                'status' => $statusValue
+            ]);
+            return false;
+        }
 
-            // Usar el servicio para actualizar el estado
-            $this->messageRepositoryService->updateMessageStatus($message, $internalStatus);
+        // Determinar si es un mensaje de plantilla basado en la conversación
+        $isTemplateMessage = false;
+        if (
+            isset($status['conversation']['origin']['type']) &&
+            $status['conversation']['origin']['type'] === 'utility'
+        ) {
+            $isTemplateMessage = true;
+        }
+
+        // Actualizar solo si es necesario
+        if ($message->status !== $statusValue) {
+
+            // Preparar datos para actualización
+            $updateData = [
+                'status' => $statusValue
+            ];
+            // Actualizar el mensaje
+            $message->update($updateData);
 
             Log::info("Estado de mensaje actualizado", [
-                'meta_message_id' => $messageId,
-                'status' => $internalStatus
-            ]);
-        } else {
-            Log::warning("No se encontró el mensaje para actualizar el estado", [
-                'meta_message_id' => $messageId
+                'meta_message_id' => $metaMessageId,
+                'status' => $statusValue,
+                'is_template' => $isTemplateMessage
             ]);
         }
+
+        return true;
     }
 }

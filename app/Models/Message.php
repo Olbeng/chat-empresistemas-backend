@@ -192,7 +192,8 @@ class Message extends Model
             return null;
         }
 
-        return url('storage/' . $this->media_path);
+        $baseUrl = config('app.media_url', url(''));
+        return $baseUrl . '/storage/' . $this->media_path;
     }
 
     /**

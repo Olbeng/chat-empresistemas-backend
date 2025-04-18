@@ -6,6 +6,8 @@ use App\Http\Controllers\AuthController;
 use App\Http\Controllers\ContactController;
 use App\Http\Controllers\MessageController;
 use App\Http\Controllers\WhatsAppWebhookController;
+use App\Http\Controllers\SecureDownloadController;
+
 
 // Route::get('/user', function (Request $request) {
 //     return $request->user();
@@ -31,9 +33,12 @@ Route::post('/whatsapp-webhook', [WhatsAppWebhookController::class, 'handleWebho
 Route::middleware(['jwt.auth'])->group(function () {
     // Obtener todos los contactos de un usuario
     Route::get('/contacts/{userId}', [ContactController::class, 'index']);
+    Route::get('/secure-download',  [SecureDownloadController::class, 'downloadFile']);
 });
 Route::group(['middleware' => 'jwt.auth'], function () {
     Route::post('/messages/send', [MessageController::class, 'send']);
+    Route::post('/messages/send-file', [MessageController::class, 'sendFile']);
+
     Route::get('/messages/{contactId}', [MessageController::class, 'getMessages']);
     Route::patch('/messages/updateMessageStatus/{contactId}', [MessageController::class, 'updateMessageStatus']);
     Route::get('/batch-messages', [MessageController::class, 'getBatchInitialMessages']);

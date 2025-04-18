@@ -23,7 +23,8 @@ class User extends Authenticatable implements JWTSubject
         'password',
         'token_meta',    // Token de acceso a la API de WhatsApp
         'verify_token',  // Token de verificación del webhook
-        'server_origin'  // Origen del servidor (opcional)
+        'server_origin',  // Origen del servidor (opcional)
+        'permission',  // Permisos del usuario (opcional)
     ];
 
     /**

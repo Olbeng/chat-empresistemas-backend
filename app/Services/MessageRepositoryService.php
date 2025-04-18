@@ -4,6 +4,7 @@ namespace App\Services;
 use App\Models\Message;
 use App\Services\NotificationService;
 use Illuminate\Support\Facades\Log;
+use App\Models\User;
 
 class MessageRepositoryService
 {
@@ -22,6 +23,11 @@ class MessageRepositoryService
     public function upsertMessage($data, $isFromWebhook = false)
     {
         try {
+            $user = User::where('id', $data['user_id'])->first();
+
+            $allowedTypes = $user->permission != "" ? explode(',', $user->permission) : [
+                Message::MESSAGE_TYPE_TEXT
+            ];
             // Verificar si el mensaje existe por meta_message_id
             $existingMessage = null;
             if (isset($data['meta_message_id'])) {
@@ -30,17 +36,6 @@ class MessageRepositoryService
 
             $messageId = null;
             $isUpdate = false;
-            Log::info("upsertMessage", [
-                'message_type' => $data['message_type']
-            ]);
-            $isMedia = in_array($data['message_type'] ?? '', [
-                Message::MESSAGE_TYPE_IMAGE,
-                Message::MESSAGE_TYPE_AUDIO,
-                Message::MESSAGE_TYPE_VIDEO,
-                Message::MESSAGE_TYPE_DOCUMENT,
-                Message::MESSAGE_TYPE_VOICE
-            ]);
-
             if ($existingMessage) {
                 // Actualizar mensaje existente
                 $existingMessage->update($data);
@@ -51,12 +46,11 @@ class MessageRepositoryService
                 $message = Message::create($data);
                 $messageId = $message->id;
             }
-
             // Obtener el mensaje actualizado o creado
             $message = Message::find($messageId);
 
             // Notificar al frontend a través de Ably con el formato correcto
-            if ($messageId) {
+            if ($messageId && in_array($message->message_type, $allowedTypes)) {
                 if ($isUpdate) {
                     // Publicar evento de actualización de estado
                     $this->notificationService->notifyStatusUpdate($message);

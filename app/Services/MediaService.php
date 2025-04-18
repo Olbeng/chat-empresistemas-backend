@@ -1,4 +1,5 @@
 <?php
+
 namespace App\Services;
 
 use GuzzleHttp\Client;
@@ -170,6 +171,52 @@ class MediaService
                 return 'Documento';
             default:
                 return 'Mensaje multimedia';
+        }
+    }
+
+    /**
+     * Guarda un archivo multimedia saliente (enviado) en el almacenamiento
+     *
+     * @param UploadedFile $file Archivo cargado
+     * @param string $messageType Tipo de mensaje
+     * @param string|null $originalFilename Nombre original del archivo
+     * @param User $user Usuario que envía el archivo
+     * @return string Ruta relativa donde se guardó el archivo
+     */
+    public function saveOutgoingMedia($file, $messageType, $originalFilename = null, $user = null)
+    {
+        try {
+            // Determinar extensión y nombre de archivo
+            $extension = $this->getExtensionByMessageType($messageType, $originalFilename);
+            $filename = $originalFilename ?? uniqid('whatsapp_') . '.' . $extension;
+            $filename = $this->sanitizeFilename($filename);
+
+            // Determinar carpeta de almacenamiento
+            $folder = $this->getFolderByMessageType($messageType);
+            $path = "whatsapp/{$folder}/" . date('Y/m/d') . '/' . $filename;
+
+            // Asegurar que la carpeta existe
+            $directory = dirname(storage_path('app/public/' . $path));
+            if (!file_exists($directory)) {
+                mkdir($directory, 0755, true);
+            }
+
+            // Guardar archivo en el almacenamiento
+            Storage::disk('public')->putFileAs(
+                dirname($path),
+                $file,
+                basename($path)
+            );
+
+            return $path;
+        } catch (\Exception $e) {
+            Log::error('Error al guardar archivo multimedia saliente', [
+                'error' => $e->getMessage(),
+                'messageType' => $messageType,
+                'filename' => $originalFilename
+            ]);
+
+            return null;
         }
     }
 }
